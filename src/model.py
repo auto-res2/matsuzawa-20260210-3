@@ -58,7 +58,7 @@ class LLMGenerator:
         # Load model
         self.model = AutoModelForCausalLM.from_pretrained(
             cfg.model.hf_model_id,
-            torch_dtype=dtype,
+            dtype=dtype,
             device_map=cfg.model.get("device_map", "auto"),
             cache_dir=cfg.model.get("cache_dir", ".cache/models"),
             trust_remote_code=True
