@@ -735,5 +735,123 @@
     "experimental_code": "import re\nimport torch\nfrom collections import defaultdict, Counter\nfrom datasets import load_dataset\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\n\n# -----------------\n# Parsing utilities\n# -----------------\nNUM_RE = re.compile(r\"-?\\d+(?:\\.\\d+)?\")\nA_RE = re.compile(r\"FinalA:\\s*(.*)\", re.IGNORECASE)\nB_RE = re.compile(r\"FinalB:\\s*(.*)\", re.IGNORECASE)\nC_RE = re.compile(r\"FinalC:\\s*(.*)\", re.IGNORECASE)\n\nSEC_A = re.compile(r\"Solve-A\\s*:(.*?)(?:Solve-B\\s*:|Check-C\\s*:|FinalA:)\", re.IGNORECASE | re.DOTALL)\nSEC_B = re.compile(r\"Solve-B\\s*:(.*?)(?:Check-C\\s*:|FinalA:)\", re.IGNORECASE | re.DOTALL)\nSEC_C = re.compile(r\"Check-C\\s*:(.*?)(?:FinalA:)\", re.IGNORECASE | re.DOTALL)\n\nTOK_RE = re.compile(r\"[a-zA-Z0-9]+\")\n\ndef normalize_num(s: str):\n    if s is None:\n        return None\n    nums = NUM_RE.findall(s)\n    if not nums:\n        return None\n    # GSM8K-style targets integers; still keep as string to exact-match gold normalization\n    return nums[-1]\n\n\ndef extract_finals(txt: str):\n    ma, mb, mc = A_RE.search(txt), B_RE.search(txt), C_RE.search(txt)\n    a = normalize_num(ma.group(1)) if ma else None\n    b = normalize_num(mb.group(1)) if mb else None\n    c = normalize_num(mc.group(1)) if mc else None\n    return a, b, c\n\n\ndef extract_section(txt: str, pat: re.Pattern):\n    m = pat.search(txt)\n    return m.group(1).strip() if m else \"\"\n\n\ndef jaccard(a: str, b: str):\n    sa = set(t.lower() for t in TOK_RE.findall(a))\n    sb = set(t.lower() for t in TOK_RE.findall(b))\n    if not sa and not sb:\n        return 0.0\n    return len(sa & sb) / max(1, len(sa | sb))\n\n\ndef majority_of_three(a, b, c):\n    vals = [x for x in (a, b, c) if x is not None]\n    if not vals:\n        return None, 0, 0\n    cnt = Counter(vals)\n    (v1, n1) = cnt.most_common(1)[0]\n    agree2 = int(n1 >= 2)\n    agree3 = int(n1 == 3)\n    return v1, agree2, agree3\n\n\ndef normalize_gold(ans: str):\n    nums = NUM_RE.findall(ans)\n    return nums[-1] if nums else ans.strip()\n\n\ndef generic_constraint_ok(question: str, pred: str):\n    if pred is None:\n        return 0\n    q = question.lower()\n    counting = any(kw in q for kw in [\"how many\", \"number of\", \"altogether\", \"total\"])\n    if counting:\n        if pred.startswith('-'):\n            return 0\n        if '.' in pred:\n            return 0\n    return 1\n\n\ndef weight_sample(txt: str, question: str, tau=0.35,\n                  b2=1.0, b3=1.5, d_orth=0.8, g_cons=0.5, copy_penalty=0.8):\n    a, b, c = extract_finals(txt)\n    cand, agree2, agree3 = majority_of_three(a, b, c)\n\n    # Orthogonality via lexical overlap between reasoning views\n    sec_a = extract_section(txt, SEC_A)\n    sec_b = extract_section(txt, SEC_B)\n    sec_c = extract_section(txt, SEC_C)\n\n    ov_ab = jaccard(sec_a, sec_b)\n    ov_ac = jaccard(sec_a, sec_c)\n    orth = 1.0 - max(ov_ab, ov_ac)\n\n    cons = generic_constraint_ok(question, cand)\n\n    w = 1.0 + b2 * agree2 + b3 * agree3 + d_orth * orth + g_cons * cons\n\n    # If it \"agrees\" but is likely copied (low orthogonality), penalize\n    if agree2 == 1 and orth < tau:\n        w -= copy_penalty * (tau - orth) / max(1e-6, tau)\n\n    if cand is None:\n        w = 0.0\n    return cand, w, {\"agree2\": agree2, \"agree3\": agree3, \"orth\": orth, \"cons\": cons}\n\n\ndef weighted_vote(cands_weights):\n    score = defaultdict(float)\n    for ans, w in cands_weights:\n        if ans is None or w <= 0:\n            continue\n        score[ans] += w\n    return max(score.items(), key=lambda kv: kv[1])[0] if score else None\n\n# -----------------\n# Prompts\n# -----------------\nBASE_COT = \"\"\"Q: {q}\\nA: Let's think step by step.\\n\"\"\"\n\nDP_ASC_PROMPT = \"\"\"Q: {q}\\nA: Step-back (1-2 lines): define variables + key equation(s)/subgoals.\\n\\nSolve-A (forward): solve step by step to get an answer.\\nSolve-B (independent check): verify by backsolving or re-deriving.\\n\\nEnd with exactly two lines:\\nFinalA: <numeric answer>\\nFinalB: <numeric answer>\\n\"\"\"\n\nOA_TSC_PROMPT = \"\"\"Q: {q}\\nA: Provide three different reasoning views and then three finals.\\n\\nPlan (JSON, 1-3 lines): keys = unknown, givens, constraints.\\n\\nSolve-A: forward step-by-step solution in natural language.\\n\\nSolve-B: equation-only derivation (use equations, variable names, and minimal annotations; avoid copying Solve-A wording).\\n\\nCheck-C: backsolve/plug-in check starting from the candidate answer; verify against givens/constraints.\\n\\nEnd with exactly three lines:\\nFinalA: <numeric>\\nFinalB: <numeric>\\nFinalC: <numeric>\\n\"\"\"\n\n# -----------------\n# Generation\n# -----------------\n@torch.no_grad()\ndef generate(model, tok, prompt, temperature=0.7, max_new_tokens=420):\n    inputs = tok(prompt, return_tensors=\"pt\").to(model.device)\n    out = model.generate(\n        **inputs,\n        do_sample=temperature > 0,\n        temperature=temperature,\n        top_p=0.95,\n        max_new_tokens=max_new_tokens,\n        pad_token_id=tok.eos_token_id,\n    )\n    return tok.decode(out[0], skip_special_tokens=True)\n\n\ndef run(model_name=\"mistralai/Mistral-7B-Instruct-v0.2\", n=200, k=10, seed=0, dataset=\"gsm8k\"):\n    torch.manual_seed(seed)\n    tok = AutoTokenizer.from_pretrained(model_name)\n    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map=\"auto\")\n\n    if dataset == \"gsm8k\":\n        ds = load_dataset(\"gsm8k\", \"main\", split=\"test\").select(range(n))\n        get_q = lambda ex: ex[\"question\"].strip()\n        get_gold = lambda ex: normalize_gold(ex[\"answer\"])\n    elif dataset == \"svamp\":\n        ds = load_dataset(\"ChilleD/SVAMP\", split=\"test\").select(range(n))\n        get_q = lambda ex: ex[\"Question\"].strip() + \" \" + ex.get(\"Body\", \"\").strip()\n        get_gold = lambda ex: str(ex[\"Answer\"]).strip()\n    else:\n        raise ValueError(\"unknown dataset\")\n\n    acc_base = acc_sc = acc_dp = acc_oa = 0\n\n    for ex in ds:\n        q = get_q(ex)\n        gold = get_gold(ex)\n\n        # A) CoT greedy\n        txt = generate(model, tok, BASE_COT.format(q=q), temperature=0.0, max_new_tokens=256)\n        nums = NUM_RE.findall(txt)\n        pred = nums[-1] if nums else None\n        acc_base += int(pred == gold)\n\n        # B) Self-consistency (unweighted)\n        freq = defaultdict(int)\n        for _ in range(k):\n            txt = generate(model, tok, BASE_COT.format(q=q), temperature=0.7, max_new_tokens=256)\n            nums = NUM_RE.findall(txt)\n            p = nums[-1] if nums else None\n            if p is not None:\n                freq[p] += 1\n        pred_sc = max(freq.items(), key=lambda kv: kv[1])[0] if freq else None\n        acc_sc += int(pred_sc == gold)\n\n        # C) DP-ASC (agreement-weighted, 2 finals)\n        pairs = []\n        for _ in range(k):\n            txt = generate(model, tok, DP_ASC_PROMPT.format(q=q), temperature=0.7, max_new_tokens=340)\n            a, b, _ = extract_finals(txt + \"\\nFinalC:\")  # cheap reuse: parse A/B only\n            agree = int(a is not None and b is not None and a == b)\n            cons = generic_constraint_ok(q, a)\n            w = 1.0 + 1.5 * agree + 0.5 * cons\n            if a is not None:\n                pairs.append((a, w))\n        pred_dp = weighted_vote(pairs)\n        acc_dp += int(pred_dp == gold)\n\n        # D) OA-TSC (proposed)\n        cw = []\n        for _ in range(k):\n            txt = generate(model, tok, OA_TSC_PROMPT.format(q=q), temperature=0.7, max_new_tokens=420)\n            cand, w, _diag = weight_sample(txt, q)\n            cw.append((cand, w))\n        pred_oa = weighted_vote(cw)\n        acc_oa += int(pred_oa == gold)\n\n    return {\n        f\"accuracy_cot_greedy_{dataset}\": acc_base / n,\n        f\"accuracy_sc_{dataset}\": acc_sc / n,\n        f\"accuracy_dp_asc_{dataset}\": acc_dp / n,\n        f\"accuracy_oa_tsc_{dataset}\": acc_oa / n,\n    }\n\n# Example:\n# print(run(n=200, k=10, seed=0, dataset=\"gsm8k\"))\n",
     "expected_result": "On GSM8K (N=200, K=10, 7B–9B instruct model):\n- CoT greedy: ~0.42–0.50 accuracy.\n- SC (unweighted): ~0.47–0.56.\n- DP-ASC (2-path agreement): ~0.51–0.61.\n- **OA-TSC (proposed): ~0.54–0.64**, i.e., **+0.02 to +0.04 over DP-ASC** and **+0.05 to +0.08 over SC**.\n\nKey diagnostic predictions:\n- `agree3` rate: ~0.35–0.60 (stricter than 2-path agreement).\n- Accuracy conditioned on (`agree3` and `orth>0.5`) is very high (often 0.80–0.92), while (`agree3` and `orth<0.3`) is noticeably lower—evidence that orthogonality separates “copied agreement” from “true redundancy.”\n- On SVAMP (N=200), gains persist but slightly smaller due to shorter problems: OA-TSC +0.01 to +0.03 over DP-ASC.\n\nHigher accuracy is better.",
     "expected_conclusion": "OA-TSC advances prompt-only Chain-of-Thought reliability by introducing a **verifier-free but more discriminative** inference-time signal: not just whether multiple derivations agree, but whether they agree **despite being measurably different**. This directly targets a major unresolved limitation of self-consistency-style methods—**correlated failure modes and pseudo-independence**—without finetuning, external solvers, or dataset-specific rules.\n\nAcademically, it reframes “independent checking” as a *quantifiable property* (orthogonality) that can be correlated with correctness and ablated, enabling cleaner study of when redundancy helps or fails. Socially/practically, the method offers a low-barrier reliability upgrade for educational and decision-support use cases by reducing confidently wrong answers that survive naive majority vote, while keeping the approach reproducible via a single Python script and prompt changes only."
+  },
+  "experimental_design": {
+    "experiment_summary": "Goal: demonstrate that Orthogonality-Aware Triangulated Self-Consistency (OA‑TSC) improves **answer correctness** on math word problems by reducing deceptively correlated self-agreement. The model is expected to: (1) read a GSM8K word problem, (2) produce three mandated reasoning views in one completion—Solve‑A (natural language), Solve‑B (equation-only), Check‑C (backsolve/plug-in verification)—and (3) output three explicit numeric finals (FinalA/FinalB/FinalC). A script then computes (i) agreement strength (2-of-3 / 3-of-3) and (ii) an orthogonality/independence score based on lexical overlap between reasoning views, and uses these to weight candidates in a K-sample vote.\n\nExperiment design:\n- Dataset/task: GSM8K **test** problems; the task is single-answer numeric solving.\n- Methods compared: DP-ASC (dual-path agreement self-consistency) vs proposed OA‑TSC (triangulated agreement + orthogonality penalty).\n- Decoding: sample K completions per question (default K=10, temperature=0.7, top_p=0.95) for each method; extract finals; aggregate via (weighted) voting.\n- No training, no verifiers, no external solvers/tools, and no dataset-specific rule engines beyond a lightweight generic constraint gate (e.g., non-negative integer for counting questions).\n\nScale adjusted to fit the provided Runner (single NVIDIA H200 140GB VRAM, 240GB RAM):\n- Use a single 8B model in bf16/fp16 with device_map=auto.\n- Evaluate on a **subset of N=200** GSM8K test questions (configurable to 500 if time allows).\n- Per item: generate K=10 samples; max_new_tokens capped (OA‑TSC: 450; DP‑ASC: 360) to bound runtime.\n- Optional hyperparameter tuning (Optuna) runs on a smaller tuning subset (e.g., N_tune=80) to keep total GPU time bounded, then a single final evaluation on N=200.",
+    "runner_config": {
+      "runner_label": [
+        "self-hosted",
+        "gpu-runner"
+      ],
+      "description": "NVIDIA H200, VRAM: 140 GB, RAM: 240 GB"
+    },
+    "evaluation_metrics": [
+      {
+        "name": "accuracy",
+        "description": "**Correctness criteria:** A prediction is correct if its final numeric answer equals the gold answer after numeric normalization.\n- Parse the method’s final predicted answer as a number (preferably from explicit `FinalA/FinalB/FinalC` lines; fallback: last numeric span in the completion if finals are missing).\n- Normalize both prediction and gold: strip commas/spaces, convert to Decimal/float.\n- If both are within 1e-9 of an integer, compare as integers. Otherwise compare with absolute tolerance 1e-3 (covers rare decimal outputs).\n\n**Calculation method:**\n- For N questions, `accuracy = (1/N) * Σ_i 1[pred_i == gold_i]`.\n- Report also 95% bootstrap CI (resample questions with replacement, 1,000 bootstrap samples) to quantify uncertainty at N=200.\n\n**Task appropriateness:** GSM8K is a single-number answer task; exact numeric correctness is the main desideratum.\n\n**Relevant visualizations:**\n- Bar chart of accuracy with 95% CI per method.\n- Paired per-question correctness scatter/heatmap (OA‑TSC correct vs DP‑ASC correct) to show win/loss counts."
+      },
+      {
+        "name": "mean_weighted_vote_margin",
+        "description": "**Correctness criteria:** Not a correctness metric; a stability/confidence proxy for the final selected answer.\n\n**Calculation method:**\n- For each question, after weighted voting over candidates, compute `margin = (score_top - score_second) / max(1e-9, score_top)`.\n- Report mean margin over the dataset.\n\n**Task appropriateness:** OA‑TSC claims improved reliability via agreement+orthogonality weighting; a larger vote margin indicates stronger internal evidence for the chosen answer.\n\n**Relevant visualizations:**\n- Histogram / KDE of per-question margins for each method.\n- Scatter of margin vs correctness (correct=1/0) to show whether higher margin correlates with correctness."
+      },
+      {
+        "name": "agree3_rate",
+        "description": "**Correctness criteria:** Not a correctness metric; measures within-sample triangulated agreement frequency in OA‑TSC.\n\n**Calculation method:**\n- For each OA‑TSC completion, extract (FinalA, FinalB, FinalC).\n- `agree3 = 1` if all three normalized finals are equal and not null.\n- `agree3_rate = (1/(N*K)) * Σ_{i,s} agree3_{i,s}` over all questions i and samples s.\n\n**Task appropriateness:** OA‑TSC’s signal relies on 3-view agreement; this quantifies how often strict agreement occurs.\n\n**Relevant visualizations:**\n- Bar chart of agree3_rate.\n- Accuracy conditioned on agree3 (two bars: agree3 vs not agree3)."
+      },
+      {
+        "name": "orthogonality_correlation_with_correctness",
+        "description": "**Correctness criteria:** Not a correctness metric; tests the hypothesis that independence (orthogonality) predicts correctness.\n\n**Calculation method:**\n- For each OA‑TSC completion, compute token-set Jaccard overlaps between text blocks: overlap(A,B) and overlap(A,C). Define `orth = 1 - max(overlap(A,B), overlap(A,C))`.\n- For each completion, label `y=1` if the completion’s candidate answer (majority of FinalA/B/C if exists else FinalA) matches gold.\n- Compute point-biserial correlation between orth and y (equivalently Pearson correlation when y is 0/1). Also report Spearman rank correlation for robustness.\n\n**Task appropriateness:** The method’s novelty is discounting agreement arising from high overlap; correlation with correctness validates that orthogonality is informative.\n\n**Relevant visualizations:**\n- Box/violin plot of orth by correctness (correct vs incorrect).\n- Reliability-style plot: bin orth into quintiles and plot accuracy per bin."
+      },
+      {
+        "name": "correctness_auc_from_proxy_score",
+        "description": "**Correctness criteria:** Measures how well OA‑TSC’s script-computed proxy score predicts correctness without a trained verifier.\n\n**Calculation method:**\n- For each OA‑TSC completion, compute `score = 1.0*agree2 + 1.5*agree3 + 0.8*orth + 0.5*constraint_ok - penalty(copying)` (exact terms as implemented).\n- Define label y as in the previous metric (completion-level correctness).\n- Compute ROC-AUC for predicting y from score.\n\n**Task appropriateness:** OA‑TSC claims a better verifier-free reliability signal; AUC quantifies discriminative power.\n\n**Relevant visualizations:**\n- ROC curve.\n- Score distribution histograms for correct vs incorrect completions."
+      },
+      {
+        "name": "tokens_per_question",
+        "description": "**Correctness criteria:** Not a correctness metric; measures computational cost.\n\n**Calculation method:**\n- For each generated completion, count generated tokens using the model tokenizer: `gen_tokens = len(output_ids) - len(input_ids)`.\n- Aggregate cost per question as the mean (or sum) across its K samples.\n- Report average tokens/question per method.\n\n**Task appropriateness:** Prompt-only improvements should be evaluated under compute budgets; OA‑TSC uses longer structured outputs.\n\n**Relevant visualizations:**\n- Scatter plot: tokens/question vs accuracy (method-level point).\n- Boxplot of tokens/question distributions."
+      }
+    ],
+    "models_to_use": [
+      "Qwen3-8B (8B parameters)"
+    ],
+    "datasets_to_use": [
+      "gsm8k"
+    ],
+    "proposed_method": {
+      "method_name": "OA-TSC (Orthogonality-Aware Triangulated Self-Consistency)",
+      "description": "Inference-time, prompt-only decoding that forces three within-sample reasoning views (forward CoT, equation-only derivation, and backsolve check), extracts three final numeric answers (FinalA/B/C), and performs K-sample aggregation using a script-computed weight that combines (i) 2-of-3/3-of-3 agreement strength, (ii) a lexical-overlap-based orthogonality penalty to discount copied/paraphrased checks, and (iii) a lightweight generic constraint gate (e.g., non-negative integer for counting questions). Novelty: explicitly quantifies and uses *independence* between reasoning paths to avoid deceptively correlated self-consistency failures—without verifiers, tools, or training.",
+      "optuna_config": {
+        "enabled": true,
+        "n_trials": 12,
+        "search_spaces": [
+          {
+            "param_name": "tau_copy_threshold",
+            "distribution_type": "uniform",
+            "low": 0.2,
+            "high": 0.6
+          },
+          {
+            "param_name": "b2_agree2_weight",
+            "distribution_type": "uniform",
+            "low": 0.3,
+            "high": 1.8
+          },
+          {
+            "param_name": "b3_agree3_weight",
+            "distribution_type": "uniform",
+            "low": 0.8,
+            "high": 2.5
+          },
+          {
+            "param_name": "d_orth_weight",
+            "distribution_type": "uniform",
+            "low": 0.0,
+            "high": 1.5
+          },
+          {
+            "param_name": "copy_penalty_scale",
+            "distribution_type": "uniform",
+            "low": 0.0,
+            "high": 1.5
+          },
+          {
+            "param_name": "k_samples",
+            "distribution_type": "int",
+            "low": 6.0,
+            "high": 12.0
+          }
+        ]
+      }
+    },
+    "comparative_methods": [
+      {
+        "method_name": "DP-ASC (Dual-Path Agreement Self-Consistency)",
+        "description": "Prompt-only dual-path decoding baseline: in each sample the model produces a short step-back plan, then Solve-A and an independent Solve-B, ending with FinalA and FinalB. A script computes agreement (FinalA==FinalB) and performs K-sample aggregation via agreement-weighted voting (no explicit orthogonality/independence measurement; no third backsolve view).",
+        "optuna_config": {
+          "enabled": true,
+          "n_trials": 12,
+          "search_spaces": [
+            {
+              "param_name": "k_samples",
+              "distribution_type": "int",
+              "low": 6.0,
+              "high": 12.0
+            },
+            {
+              "param_name": "agree_bonus_weight",
+              "distribution_type": "uniform",
+              "low": 0.5,
+              "high": 2.5
+            },
+            {
+              "param_name": "constraint_gate_weight",
+              "distribution_type": "uniform",
+              "low": 0.0,
+              "high": 1.0
+            }
+          ]
+        }
+      }
+    ]
   }
 }
