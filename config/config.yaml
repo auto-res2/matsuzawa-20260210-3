@@ -3,7 +3,6 @@
 
 defaults:
   - _self_
-  - run: ???  # Must be specified via command line
 
 # WandB configuration
 wandb:
@@ -21,6 +20,16 @@ seed: 42
 cache:
   models: .cache/models
   datasets: .cache/datasets
+
+# Placeholder for run config (will be loaded from runs/ directory)
+run:
+  run_id: null
+  method: {}
+  model: {}
+  dataset: {}
+  training: {}
+  optuna: {}
+  evaluation: {}
 
 # Hydra configuration
 hydra:
