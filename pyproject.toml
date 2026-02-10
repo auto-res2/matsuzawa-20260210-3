@@ -1,1 +1,33 @@
-# Please list the required python packages.
+[project]
+name = "oa-tsc-experiments"
+version = "0.1.0"
+description = "Orthogonality-Aware Triangulated Self-Consistency (OA-TSC) experiments"
+requires-python = ">=3.9"
+
+dependencies = [
+    # Core ML frameworks
+    "torch>=2.0.0",
+    "transformers>=4.35.0",
+    "datasets>=2.14.0",
+    
+    # Experiment management
+    "hydra-core>=1.3.0",
+    "omegaconf>=2.3.0",
+    "wandb>=0.15.0",
+    
+    # Hyperparameter optimization
+    "optuna>=3.3.0",
+    
+    # Scientific computing
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "scikit-learn>=1.3.0",
+    
+    # Visualization
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_mode"

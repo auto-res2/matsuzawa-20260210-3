@@ -1,0 +1,33 @@
+# Base Hydra configuration for OA-TSC experiments
+# Shared defaults and WandB settings
+
+defaults:
+  - _self_
+  - run: ???  # Must be specified via command line
+
+# WandB configuration
+wandb:
+  entity: airas
+  project: "2026-02-10"
+  mode: online  # Will be overridden to 'disabled' in sanity_check mode
+  
+# Results directory (will be overridden via command line)
+results_dir: results
+
+# Global seed
+seed: 42
+
+# Cache directories
+cache:
+  models: .cache/models
+  datasets: .cache/datasets
+
+# Hydra configuration
+hydra:
+  run:
+    dir: ${results_dir}/${run.run_id}
+  sweep:
+    dir: ${results_dir}/multirun
+    subdir: ${run.run_id}
+  job:
+    chdir: false  # Don't change working directory

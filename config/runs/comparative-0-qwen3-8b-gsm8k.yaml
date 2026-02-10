@@ -1,0 +1,86 @@
+# DP-ASC (Dual-Path Agreement Self-Consistency) - Comparative Baseline
+# Model: Qwen3-8B, Dataset: GSM8K
+
+run_id: comparative-0-qwen3-8b-gsm8k
+
+method:
+  name: DP-ASC
+  type: comparative
+  description: "Dual-Path Agreement Self-Consistency - dual-path decoding with agreement-weighted voting (no orthogonality measurement)"
+  
+  # Inference parameters
+  temperature: 0.7
+  top_p: 0.95
+  max_new_tokens: 360
+  k_samples: 10  # Will be tuned by Optuna
+  
+  # Prompt template - dual-path structure
+  prompt_template: |
+    Q: {question}
+    A: Step-back (1-2 lines): define variables + key equation(s)/subgoals.
+    
+    Solve-A (forward): solve step by step to get an answer.
+    Solve-B (independent check): verify by backsolving or re-deriving.
+    
+    End with exactly two lines:
+    FinalA: <numeric answer>
+    FinalB: <numeric answer>
+  
+  # Weighting parameters (will be tuned by Optuna)
+  agree_bonus_weight: 1.5
+  constraint_gate_weight: 0.5
+
+model:
+  name: Qwen/Qwen2.5-7B-Instruct
+  hf_model_id: Qwen/Qwen2.5-7B-Instruct
+  torch_dtype: bfloat16
+  device_map: auto
+  cache_dir: .cache/models
+
+dataset:
+  name: gsm8k
+  hf_dataset_id: gsm8k
+  hf_dataset_config: main
+  split: test
+  n_samples: 200  # Full evaluation on 200 test samples
+  n_tune_samples: 80  # Smaller subset for Optuna tuning
+  cache_dir: .cache/datasets
+  
+  # Dataset-specific field mappings
+  question_field: question
+  answer_field: answer
+
+training:
+  seed: 42
+  mode: main  # Will be overridden by --sanity_check flag
+
+optuna:
+  enabled: true
+  n_trials: 12
+  study_name: dp-asc-qwen3-8b-gsm8k
+  direction: maximize
+  metric: accuracy
+  
+  search_spaces:
+    - param_name: k_samples
+      distribution_type: int
+      low: 6
+      high: 12
+    
+    - param_name: agree_bonus_weight
+      distribution_type: uniform
+      low: 0.5
+      high: 2.5
+    
+    - param_name: constraint_gate_weight
+      distribution_type: uniform
+      low: 0.0
+      high: 1.0
+
+evaluation:
+  primary_metric: accuracy
+  
+  metrics:
+    - accuracy
+    - mean_weighted_vote_margin
+    - tokens_per_question
