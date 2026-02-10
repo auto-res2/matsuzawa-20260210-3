@@ -22,8 +22,9 @@ cache:
   datasets: .cache/datasets
 
 # Placeholder for run config (will be loaded from runs/ directory)
+run_id: null
+
 run:
-  run_id: null
   method: {}
   model: {}
   dataset: {}
@@ -34,9 +35,9 @@ run:
 # Hydra configuration
 hydra:
   run:
-    dir: ${results_dir}/${run.run_id}
+    dir: ${results_dir}/${run_id}
   sweep:
     dir: ${results_dir}/multirun
-    subdir: ${run.run_id}
+    subdir: ${run_id}
   job:
     chdir: false  # Don't change working directory

@@ -56,6 +56,9 @@ def main(cfg: DictConfig):
         if run_config_path.exists():
             print(f"Loading run config from: {run_config_path}")
             run_cfg = OmegaConf.load(run_config_path)
+            # Set run_id at top level for Hydra interpolation
+            if "run_id" in run_cfg:
+                cfg.run_id = run_cfg.run_id
             # Store the full run config under 'run' for reference
             cfg.run = run_cfg
             # Merge top-level fields from run config into root cfg
