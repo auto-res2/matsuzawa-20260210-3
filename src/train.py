@@ -195,8 +195,11 @@ def train(cfg: DictConfig):
         k = int(cfg.method.k_samples)
         
         # In sanity_check mode, limit to 1 sample per question for speed
+        # But use temperature 0 for more deterministic/reliable output
+        temp = cfg.method.temperature
         if mode == "sanity_check":
             k = 1
+            temp = 0.0  # Use greedy decoding for sanity check
         
         candidates_weights = []
         sample_diagnostics = []
@@ -209,10 +212,15 @@ def train(cfg: DictConfig):
             # Generate
             generated = generator.generate(
                 prompt,
-                temperature=cfg.method.temperature,
+                temperature=temp,
                 top_p=cfg.method.top_p,
                 max_new_tokens=cfg.method.max_new_tokens,
             )
+            
+            # Debug: print first sample in sanity mode
+            if mode == "sanity_check" and idx == 0 and sample_idx == 0:
+                print(f"\n[DEBUG] First generation sample:")
+                print(f"Generated text: {generated[:500]}...")
             
             # Count tokens
             total_tokens += generator.count_tokens(generated)
@@ -222,6 +230,11 @@ def train(cfg: DictConfig):
                 candidate, weight, diag = weight_oa_tsc_sample(generated, question, cfg)
             else:  # DP-ASC
                 candidate, weight, diag = weight_dp_asc_sample(generated, question, cfg)
+            
+            # Debug: print extraction results
+            if mode == "sanity_check" and idx == 0 and sample_idx == 0:
+                print(f"[DEBUG] Extracted candidate: {candidate}, weight: {weight}")
+                print(f"[DEBUG] Diagnostics: {diag}")
             
             candidates_weights.append((candidate, weight))
             sample_diagnostics.append(diag)

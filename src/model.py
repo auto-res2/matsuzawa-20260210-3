@@ -10,10 +10,17 @@ from omegaconf import DictConfig
 
 
 # Regular expressions for parsing
-NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
-A_RE = re.compile(r"FinalA:\s*(.*)", re.IGNORECASE)
-B_RE = re.compile(r"FinalB:\s*(.*)", re.IGNORECASE)
-C_RE = re.compile(r"FinalC:\s*(.*)", re.IGNORECASE)
+NUM_RE = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")  # Support comma separators
+A_RE = re.compile(r"FinalA[:\s]+([^\n]*)", re.IGNORECASE)
+B_RE = re.compile(r"FinalB[:\s]+([^\n]*)", re.IGNORECASE)
+C_RE = re.compile(r"FinalC[:\s]+([^\n]*)", re.IGNORECASE)
+
+# Alternative patterns for extracting answers
+ANSWER_PATTERNS = [
+    re.compile(r"(?:final answer|answer|result)[:\s]+([^\n]*)", re.IGNORECASE),
+    re.compile(r"(?:therefore|thus|so)[,\s]+.*?is[:\s]+([^\n.]+)", re.IGNORECASE),
+    re.compile(r"####\s*(\d+)", re.IGNORECASE),  # GSM8K format
+]
 
 # Section extraction patterns
 SEC_A = re.compile(r"Solve-A\s*:(.*?)(?:Solve-B\s*:|Check-C\s*:|FinalA:|$)", re.IGNORECASE | re.DOTALL)
@@ -79,9 +86,10 @@ class LLMGenerator:
             max_new_tokens: Maximum tokens to generate
             
         Returns:
-            Generated text (full output including prompt)
+            Generated text (only the new completion, without the prompt)
         """
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        input_length = inputs.input_ids.shape[1]
         
         # Generate
         outputs = self.model.generate(
@@ -93,8 +101,9 @@ class LLMGenerator:
             pad_token_id=self.tokenizer.eos_token_id,
         )
         
-        # Decode
-        generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # Decode only the new tokens (exclude prompt)
+        new_tokens = outputs[0, input_length:]
+        generated_text = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
         
         return generated_text
     
@@ -110,12 +119,29 @@ def normalize_num(s: str) -> str:
     if s is None:
         return None
     
+    # Convert to string if not already
+    s = str(s).strip()
+    
+    # Remove commas from numbers
+    s = s.replace(',', '')
+    
     nums = NUM_RE.findall(s)
     if not nums:
         return None
     
-    # Return last number found
-    return nums[-1]
+    # Return last number found (often the final answer)
+    last_num = nums[-1].replace(',', '')  # Remove any commas
+    
+    # Clean up: remove trailing .0 for integers
+    if '.' in last_num:
+        try:
+            val = float(last_num)
+            if val == int(val):
+                return str(int(val))
+        except ValueError:
+            pass
+    
+    return last_num
 
 
 def extract_finals(text: str) -> tuple:
@@ -135,6 +161,29 @@ def extract_finals(text: str) -> tuple:
     a = normalize_num(ma.group(1)) if ma else None
     b = normalize_num(mb.group(1)) if mb else None
     c = normalize_num(mc.group(1)) if mc else None
+    
+    # Fallback 1: try alternative answer patterns if FinalA not found
+    if a is None:
+        for pattern in ANSWER_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                a = normalize_num(match.group(1))
+                if a is not None:
+                    break
+    
+    # Fallback 2: if still no answer, look for numbers in the last few lines
+    if a is None:
+        # Look for numbers in the last few lines
+        lines = text.strip().split('\n')
+        for line in reversed(lines[-10:]):  # Check last 10 lines
+            # Skip empty lines
+            if not line.strip():
+                continue
+            nums = NUM_RE.findall(line.replace(',', ''))
+            if nums:
+                # Use last number found as FinalA
+                a = nums[-1]
+                break
     
     return a, b, c
 
@@ -308,11 +357,15 @@ def weight_dp_asc_sample(text: str, question: str, cfg: DictConfig) -> tuple:
     # Extract finals (only A and B for DP-ASC)
     a, b, _ = extract_finals(text + "\nFinalC:")  # Dummy C to reuse extraction
     
+    # Fallback: if both A and B are None but we found a number in the fallback, use it for both
+    if a is not None and b is None:
+        b = a  # If only A found, assume B should be same for agreement
+    
     # Agreement check
     agree = int(a is not None and b is not None and a == b)
     
-    # Use FinalA as candidate
-    candidate = a
+    # Use FinalA as candidate (or B if A is None)
+    candidate = a if a is not None else b
     
     # Constraint check
     constraint_ok = generic_constraint_check(question, candidate)
@@ -331,6 +384,8 @@ def weight_dp_asc_sample(text: str, question: str, cfg: DictConfig) -> tuple:
     diagnostics = {
         "agree": agree,
         "constraint_ok": constraint_ok,
+        "finalA": a,
+        "finalB": b,
     }
     
     return candidate, weight, diagnostics

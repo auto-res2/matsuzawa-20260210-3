@@ -16,15 +16,23 @@ method:
   
   # Prompt template - dual-path structure
   prompt_template: |
-    Q: {question}
-    A: Step-back (1-2 lines): define variables + key equation(s)/subgoals.
+    You are a helpful math assistant. Solve this problem step by step.
     
-    Solve-A (forward): solve step by step to get an answer.
-    Solve-B (independent check): verify by backsolving or re-deriving.
+    Question: {question}
     
-    End with exactly two lines:
-    FinalA: <numeric answer>
-    FinalB: <numeric answer>
+    Please solve this problem using two independent approaches:
+    
+    First, provide a step-back analysis (1-2 lines) defining variables and key equations.
+    
+    Solve-A (forward approach): Solve step by step to get an answer.
+    
+    Solve-B (independent verification): Verify by backsolving or re-deriving using a different method.
+    
+    After your work, provide your final answers on these exact lines:
+    FinalA: [your numeric answer from Solve-A]
+    FinalB: [your numeric answer from Solve-B]
+    
+    Remember to end with those two lines exactly.
   
   # Weighting parameters (will be tuned by Optuna)
   agree_bonus_weight: 1.5
