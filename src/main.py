@@ -61,10 +61,14 @@ def main(cfg: DictConfig):
                 cfg.run_id = run_cfg.run_id
             # Store the full run config under 'run' for reference
             cfg.run = run_cfg
+            # Disable struct mode to allow merging new keys
+            OmegaConf.set_struct(cfg, False)
             # Merge top-level fields from run config into root cfg
             for key in ["method", "model", "dataset", "training", "optuna", "evaluation"]:
                 if key in run_cfg:
                     cfg[key] = run_cfg[key]
+            # Re-enable struct mode after merging
+            OmegaConf.set_struct(cfg, True)
         else:
             raise FileNotFoundError(f"Run config not found: {run_config_path}")
     else:
