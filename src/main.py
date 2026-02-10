@@ -8,6 +8,23 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 
+# Pre-process sys.argv to extract mode flags before Hydra sees them
+# This allows workflows to use --sanity_check, --pilot, --main without Hydra errors
+_MODE = "main"
+_MODE_FLAGS = ["--sanity_check", "--pilot", "--main"]
+_filtered_argv = []
+for arg in sys.argv:
+    if arg == "--sanity_check":
+        _MODE = "sanity_check"
+    elif arg == "--pilot":
+        _MODE = "pilot"
+    elif arg == "--main":
+        _MODE = "main"
+    elif arg not in _MODE_FLAGS:
+        _filtered_argv.append(arg)
+sys.argv = _filtered_argv
+
+
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(cfg: DictConfig):
     """
@@ -18,37 +35,30 @@ def main(cfg: DictConfig):
     Args:
         cfg: Hydra config
     """
-    # Check for mode flags
-    mode = "main"
-    if "--sanity_check" in sys.argv:
-        mode = "sanity_check"
-        sys.argv.remove("--sanity_check")
-    elif "--pilot" in sys.argv:
-        mode = "pilot"
-        sys.argv.remove("--pilot")
-    elif "--main" in sys.argv:
-        mode = "main"
-        sys.argv.remove("--main")
+    # Use the mode detected from command-line flags
+    mode = _MODE
     
     # Apply mode-specific overrides
     if mode == "sanity_check":
         print("Running in SANITY_CHECK mode")
         # Override config for sanity check
-        OmegaConf.update(cfg, "training.mode", "sanity_check")
-        OmegaConf.update(cfg, "wandb.mode", "disabled")
-        OmegaConf.update(cfg, "optuna.enabled", False)
-        OmegaConf.update(cfg, "optuna.n_trials", 0)
+        OmegaConf.update(cfg, "training.mode", "sanity_check", merge=False)
+        OmegaConf.update(cfg, "wandb.mode", "disabled", merge=False)
+        OmegaConf.update(cfg, "optuna.enabled", False, merge=False)
+        if "optuna" in cfg and "n_trials" in cfg.optuna:
+            OmegaConf.update(cfg, "optuna.n_trials", 0, merge=False)
     elif mode == "pilot":
         print("Running in PILOT mode")
-        OmegaConf.update(cfg, "training.mode", "pilot")
+        OmegaConf.update(cfg, "training.mode", "pilot", merge=False)
         # Pilot mode: reduced scale but WandB enabled
-        OmegaConf.update(cfg, "dataset.n_samples", 50)
-        if cfg.optuna.enabled:
-            OmegaConf.update(cfg, "optuna.n_trials", 5)
+        if "dataset" in cfg and "n_samples" in cfg.dataset:
+            OmegaConf.update(cfg, "dataset.n_samples", 50, merge=False)
+        if "optuna" in cfg and cfg.get("optuna", {}).get("enabled", False):
+            OmegaConf.update(cfg, "optuna.n_trials", 5, merge=False)
     else:
         print("Running in MAIN mode")
-        OmegaConf.update(cfg, "training.mode", "main")
-        OmegaConf.update(cfg, "wandb.mode", "online")
+        OmegaConf.update(cfg, "training.mode", "main", merge=False)
+        OmegaConf.update(cfg, "wandb.mode", "online", merge=False)
     
     # Print config
     print("\n" + "="*60)
